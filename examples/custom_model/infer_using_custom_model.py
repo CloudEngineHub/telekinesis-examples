@@ -17,7 +17,7 @@ def iris_inference_example():
     # ===================== Run Skill ======================================
     detection_results, categories = iris_backend.infer(
         image=image,
-        model_id="epson_bin_picking",
+        model_name="epson_bin_picking",
         threshold=0.5,
     )
 
