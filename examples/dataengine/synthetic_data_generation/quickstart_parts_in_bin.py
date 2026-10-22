@@ -1,0 +1,263 @@
+"""Generate a bin-picking dataset."""
+
+import argparse
+
+import numpy as np
+
+from telekinesis.illusion.core.scene import Scene
+from telekinesis.illusion.core.engine import (
+    BlenderEngine,
+    RenderConfig,
+    PhysicsConfig,
+)
+from telekinesis.illusion.types.camera import CameraConfig
+from telekinesis.illusion.core.synthetic_data_generator import (
+    SyntheticDataGenerator,
+)
+from telekinesis.illusion.randomizer.randomizer import Randomizer
+from telekinesis.illusion.randomizer.randomizer_node import (
+    BackgroundRandomizer,
+    CameraPoseRandomizer,
+    LightPoseRandomizer,
+    LightRandomizer,
+    MaterialRandomizer,
+    ObjectInstanceRandomizer,
+    ObjectPoseRandomizer,
+)
+from telekinesis.illusion.sampler.camera_pose_sampler import (
+    shell_sampler,
+    volume_sampler,
+)
+from telekinesis.illusion.types.distribution import uniform
+from telekinesis.illusion.types.light import Light
+from telekinesis.illusion.types.model_asset import ModelAsset
+from telekinesis.illusion.types.object import Object
+from telekinesis.illusion.utils.assets import resolve_asset_dir
+from telekinesis.illusion.writer.writer import CocoWriter
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--preview",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Open the generated dataset in the interactive viewer.",
+    )
+    parser.add_argument("--num-images", type=int, default=5)
+    parser.add_argument("--output-dir", type=str, default=None)
+    parser.add_argument("--resolution", type=int, default=720)
+    parser.add_argument("--samples", type=int, default=None)
+    parser.add_argument("--device", default="CUDA")
+    parser.add_argument("--seed", type=int, default=None)
+    args = parser.parse_args()
+    if args.seed is not None:
+        import random
+
+        random.seed(args.seed)
+        np.random.seed(args.seed)
+
+    # Create the context
+    scene = Scene(
+        camera_config=CameraConfig(
+            image_width=args.resolution, image_height=args.resolution
+        )
+    )
+
+    assets_dir = resolve_asset_dir()
+
+    scene.add(Light("softbox", "AREA", power=80.0, size=0.4))
+    scene.add(Light("spot", "SPOT", power=20.0, radius=0.03))
+
+    # Add models to the context
+    model_1_path = str(
+        assets_dir / "models" / "mechanical_parts" / "gearwheel_1.glb"
+    )
+    scene.add(
+        ModelAsset(
+            model_1_path,
+            object_name="part_1",
+            uv_mapping="cube",
+            active_in_simulation=True,
+        )
+    )
+
+    model_2_path = str(
+        assets_dir / "models" / "mechanical_parts" / "pipe_fixture_1.glb"
+    )
+    scene.add(
+        ModelAsset(
+            model_2_path,
+            object_name="part_2",
+            uv_mapping="cube",
+            shading="SMOOTH",
+            active_in_simulation=True,
+        )
+    )
+
+    model_3_path = str(assets_dir / "models" / "bins" / "plastic_bin_2.glb")
+    scene.add(
+        ModelAsset(
+            model_3_path,
+            object_name="crate_2",
+            uv_mapping="cube",
+            collision_shape="MESH",
+        )
+    )
+
+    # Create the randomizer
+    randomizer = Randomizer()
+
+    # Add object instance ranodmizer
+    object_instance_randomizer = ObjectInstanceRandomizer(
+        counts={"part_1": (1, 3), "part_2": (0, 1)},
+        min_num_total_objects=1,
+        max_num_total_objects=4,
+    )
+
+    randomizer.add_randomizer(
+        randomizer_node=object_instance_randomizer,
+        node_name="instance_randomizer_objects",
+    )
+
+    # Add container instance ranodmizer
+    container_instance_randomizer = ObjectInstanceRandomizer(
+        counts={"crate_2": (1, 1)},
+        min_num_total_objects=1,
+        max_num_total_objects=1,
+    )
+
+    randomizer.add_randomizer(
+        randomizer_node=container_instance_randomizer,
+        node_name="instance_randomizer_containers",
+    )
+
+    # Add object pose randomizer
+    def sample_pose(obj: Object):
+        """
+        Randomly samples and applies a 6-DoF pose to an object.
+
+        The object's location is sampled uniformly within an axis-aligned box
+        centered around the origin.
+        """
+        obj.set_location(
+            np.random.uniform((-0.15, -0.15, 0.15), (0.15, 0.15, 0.15))
+        )
+        obj.set_rotation(np.random.uniform((-180, -180, -180), (180, 180, 180)))
+
+    object_pose_randomizer = ObjectPoseRandomizer(
+        pose_sampling_function=sample_pose, target_objects=["part_1", "part_2"]
+    )
+
+    randomizer.add_randomizer(
+        randomizer_node=object_pose_randomizer, node_name="pose_randomizer"
+    )
+
+    # Add matrial randomizer
+    material_randomizer = MaterialRandomizer(
+        target_objects=["part_1", "part_2"], types=["metal"]
+    )
+
+    randomizer.add_randomizer(
+        randomizer_node=material_randomizer,
+        node_name="material_randomizer_parts",
+    )
+
+    material_randomizer = MaterialRandomizer(
+        target_objects=["crate_2"], types=["plastic"]
+    )
+
+    randomizer.add_randomizer(
+        randomizer_node=material_randomizer,
+        node_name="material_randomizer_crate",
+    )
+
+    # Add background randomizer
+    background_randomizer = BackgroundRandomizer(
+        categories=["indoor/industrial", "indoor/studio"]
+    )
+
+    randomizer.add_randomizer(
+        randomizer_node=background_randomizer, node_name="background_randomizer"
+    )
+
+    # Sample a softbox shape/size and a separate spotlight cone.
+    randomizer.add_randomizer(
+        LightRandomizer(
+            ["softbox"],
+            color=uniform((0.85, 0.85, 0.85), (1.0, 1.0, 1.0)),
+            power=uniform(40.0, 100.0),
+            shape=["SQUARE", "RECTANGLE", "DISK", "ELLIPSE"],
+            size=uniform(0.3, 0.6),
+            size_y=uniform(0.2, 0.4),
+        ),
+        node_name="area_light_properties",
+    )
+    randomizer.add_randomizer(
+        LightRandomizer(
+            ["spot"],
+            power=uniform(10.0, 30.0),
+            radius=uniform(0.02, 0.05),
+            spot_size=uniform(np.deg2rad(45), np.deg2rad(75)),
+            spot_blend=uniform(0.3, 0.7),
+        ),
+        node_name="spot_light_properties",
+    )
+    # Keep both emitters above and clear of the bin and parts.
+    randomizer.add_randomizer(
+        LightPoseRandomizer(
+            shell_sampler,
+            target_lights=["softbox", "spot"],
+            center=["crate_2"],
+            min_distance=0.3,
+            radius_min=1.2,
+            radius_max=1.6,
+            elevation_min=50.0,
+            elevation_max=80.0,
+        ),
+        node_name="light_poses",
+    )
+
+    # Add camera pose randomizer
+    camera_pose_randomizer = CameraPoseRandomizer(
+        pose_sampling_function=volume_sampler, number_of_views=2
+    )
+
+    randomizer.add_randomizer(
+        randomizer_node=camera_pose_randomizer,
+        node_name="camera_pose_randomizer",
+    )
+
+    # Create the writer
+    writer = CocoWriter(
+        output_dir=args.output_dir, include_camera_metadata=True
+    )
+
+    # Create the data generator with context, randomizer and writer
+    data_generator = SyntheticDataGenerator(
+        scene=scene,
+        randomizer=randomizer,
+        writer=writer,
+        engine=BlenderEngine(
+            RenderConfig(device=args.device, samples=args.samples),
+            PhysicsConfig(active=True),
+        ),
+    )
+
+    # Preparation creates the objects once; static transforms can now be set.
+    data_generator.prepare()
+    scene.get_objects_by_name("crate_2").set_location(
+        np.array([0.0, 0.0, -0.05])
+    )
+
+    # Generate data
+    data_generator.generate(num_images=args.num_images)
+
+    if args.preview:
+        from telekinesis.illusion.viewer.shard_viewer import view_coco
+
+        view_coco(writer.get_output_dir())
+
+
+if __name__ == "__main__":
+    main()
