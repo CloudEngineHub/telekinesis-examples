@@ -9,7 +9,19 @@ from torch.utils.data import DataLoader
 from telekinesis.iris.dataset import COCODataset
 
 
-def main(args: argparse.Namespace) -> None:
+def parse_args() -> argparse.Namespace:
+    """Parse command-line arguments."""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--dataset-dir",
+        type=Path,
+        required=True,
+        help="Path to the COCO dataset directory.",
+    )
+    return parser.parse_args()
+
+
+def inspect_training_dataset(args: argparse.Namespace) -> None:
     """Load a COCO dataset and inspect individual and batched samples."""
     # ===================== Load Dataset ===================================
     dataset = COCODataset(
@@ -49,11 +61,4 @@ def main(args: argparse.Namespace) -> None:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--dataset-dir",
-        type=Path,
-        required=True,
-        help="Path to the COCO dataset directory.",
-    )
-    main(parser.parse_args())
+    inspect_training_dataset(parse_args())
